@@ -94,7 +94,7 @@ my sub backup_files {
         directory_entries($path);
 }
 
-my sub allocated_file_size {
+my sub backup_file_sizes {
     my ($file) = @_;
 
     my @stat = lstat($file);
@@ -102,14 +102,17 @@ my sub allocated_file_size {
     die "backup file '$file' is not a regular file\n" if !S_ISREG($stat[2]);
     die "unable to determine allocated size of '$file'\n" if !defined($stat[12]);
     # st_blocks counts 512-byte units, independently of the filesystem block size.
-    return $stat[12] * 512;
+    return ($stat[7], $stat[12] * 512);
 }
 
 my sub backup_size {
     my ($path) = @_;
 
     my $size = 0;
-    $size += allocated_file_size($_) for backup_files($path);
+    for my $file (backup_files($path)) {
+        my (undef, $allocated) = backup_file_sizes($file);
+        $size += $allocated;
+    }
     # stat values are tainted under vzdump/pvesm. pvesm uses the size's length
     # to construct a printf format, so validate before returning the number.
     my ($bytes) = $size =~ m/\A(\d+)\z/;
@@ -383,24 +386,18 @@ sub update_volume_attribute {
 }
 
 sub volume_size_info {
-    my ($class, $scfg, $storeid, $volname, $timeout) = @_;
+    my ($class, $scfg, $storeid, $volname) = @_;
 
     my ($backup_dir, $ctime) = backup_directory($class, $scfg, $volname);
     my $size = 0;
     my $used = 0;
     for my $backup_file (backup_files($backup_dir)) {
-        if ($backup_file =~ m!\.raw\z!) {
-            my ($virtual_size, undef, $disk_size) =
-                PVE::Storage::Plugin::file_size_info($backup_file, $timeout, 'raw', 1);
-            die "unable to determine size of '$backup_file'\n" if !defined($virtual_size);
-            $size += $virtual_size;
-            $used += $disk_size // allocated_file_size($backup_file);
-        } elsif ($backup_file =~ m!\.qcow2\z!) {
-            die "legacy qcow2 backup images are not supported: '$backup_file'\n";
-        } else {
-            $size += -s $backup_file;
-            $used += allocated_file_size($backup_file);
-        }
+        die "legacy qcow2 backup images are not supported: '$backup_file'\n"
+            if $backup_file =~ m!\.qcow2\z!;
+        # Raw images have no format metadata. Their logical size is the file length.
+        my ($length, $allocated) = backup_file_sizes($backup_file);
+        $size += $length;
+        $used += $allocated;
     }
     ($size) = $size =~ m/\A(\d+)\z/;
     ($used) = $used =~ m/\A(\d+)\z/;
